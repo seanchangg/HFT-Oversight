@@ -1,0 +1,2 @@
+[console_scripts]
+server = hft_oversight.server.app:main
