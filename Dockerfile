@@ -13,7 +13,7 @@ WORKDIR /app
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     mv /root/.local/bin/uv /usr/local/bin/uv
 
-# Install Python deps
+# Install Python deps (flash-attn excluded — needs GPU at compile time)
 RUN uv pip install --system \
     torch==2.5.1 \
     transformers>=4.46.0 \
@@ -25,8 +25,7 @@ RUN uv pip install --system \
     huggingface_hub>=0.26.0 \
     pydantic>=2.0.0 \
     openenv-core>=0.2.0 \
-    matplotlib>=3.8.0 \
-    flash-attn --no-build-isolation
+    matplotlib>=3.8.0
 
 # Copy project
 COPY HFToversight/ /app
@@ -34,4 +33,5 @@ COPY HFToversight/ /app
 ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python3", "train.py"]
+# Install flash-attn at runtime (has GPU access), then run training
+CMD pip install flash-attn --no-build-isolation && python3 train.py
