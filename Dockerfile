@@ -13,14 +13,14 @@ WORKDIR /app
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     mv /root/.local/bin/uv /usr/local/bin/uv
 
-# Install Python deps (flash-attn excluded — needs GPU at compile time)
+# Pin compatible versions: trl 0.12.x needs torch 2.5.x
 RUN uv pip install --system \
     torch==2.5.1 \
-    transformers>=4.46.0 \
-    trl>=0.12.0 \
+    trl==0.12.4 \
+    transformers==4.46.3 \
     peft>=0.13.0 \
     accelerate>=1.0.0 \
-    vllm>=0.6.0 \
+    vllm==0.6.6.post1 \
     datasets>=3.0.0 \
     huggingface_hub>=0.26.0 \
     pydantic>=2.0.0 \
@@ -33,5 +33,9 @@ COPY HFToversight/ /app
 ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
 
-# Install flash-attn at runtime (has GPU access), then run training
+# Verify imports + env work at build time (catches version mismatches)
+RUN python3 -c "from trl import GRPOConfig, GRPOTrainer; print('TRL OK')"
+RUN python3 smoke_test.py
+
+# Install flash-attn at runtime (needs GPU), then run training
 CMD pip install flash-attn --no-build-isolation && python3 train.py
