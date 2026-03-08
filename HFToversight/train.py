@@ -480,6 +480,7 @@ def main():
     parser.add_argument("--max-completion-length", type=int, default=512)
     parser.add_argument("--output-dir", type=str, default="checkpoints/hft-oversight-grpo")
     parser.add_argument("--data-dir", type=str, default="data")
+    parser.add_argument("--use-vllm", action="store_true", help="Use vLLM for generation (requires vllm installed)")
     parser.add_argument("--vllm-mode", type=str, default="colocate", choices=["colocate", "server"])
     parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000")
     parser.add_argument("--baseline-only", action="store_true")
@@ -536,11 +537,8 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    grpo_config = GRPOConfig(
+    grpo_kwargs = dict(
         output_dir=args.output_dir,
-        use_vllm=True,
-        vllm_mode=args.vllm_mode,
-        **({"vllm_server_base_url": args.vllm_server_url} if args.vllm_mode == "server" else {}),
         num_train_epochs=args.num_epochs,
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
@@ -552,6 +550,13 @@ def main():
         bf16=True,
         report_to="none",
     )
+    if args.use_vllm:
+        grpo_kwargs["use_vllm"] = True
+        grpo_kwargs["vllm_mode"] = args.vllm_mode
+        if args.vllm_mode == "server":
+            grpo_kwargs["vllm_server_base_url"] = args.vllm_server_url
+
+    grpo_config = GRPOConfig(**grpo_kwargs)
 
     print(f"  Model: {args.model}")
     print(f"  Prompts: {len(dataset)}")
