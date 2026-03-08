@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3-pip git curl && \
+    python3.11 python3.11-venv python3.11-dev python3-pip git curl && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.11 /usr/bin/python
@@ -25,6 +25,7 @@ RUN uv pip install --system \
     huggingface_hub>=0.26.0 \
     pydantic>=2.0.0 \
     openenv-core>=0.2.0 \
+    matplotlib>=3.8.0 \
     flash-attn --no-build-isolation
 
 # Copy project
@@ -33,5 +34,5 @@ COPY . /app
 ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
 
-# Default: run training
+# Default: full pipeline (baseline -> train -> eval -> graph)
 CMD ["python3", "train.py"]

@@ -485,6 +485,10 @@ def main():
     parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--no-judge", action="store_true", help="Disable LLM-as-judge reasoning reward")
+    parser.add_argument("--push-to-hub", type=str, default=None,
+                        help="HF Hub repo to push checkpoint (e.g. seanchangg/hft-oversight-grpo)")
+    parser.add_argument("--eval-episodes", type=int, default=10,
+                        help="Episodes per difficulty for post-training eval")
     args = parser.parse_args()
 
     # Phase 1: Baseline
@@ -577,17 +581,157 @@ def main():
     trainer.save_model(args.output_dir)
     print(f"\nModel saved to {args.output_dir}")
 
-    # Print summary
-    if baseline:
-        print("\n" + "=" * 60)
-        print("BASELINE (pre-training)")
-        print("=" * 60)
-        print(f"{'Difficulty':<12} {'Win Rate':<12} {'Avg Reward':<14}")
-        print("-" * 38)
-        for d in [1, 3, 5, 7]:
-            if d in baseline:
-                print(f"{d:<12} {baseline[d]['win_rate']:<12.0%} {baseline[d]['avg_reward']:<14.1f}")
-        print("\nRun evaluation with the trained checkpoint to compare.")
+    # Push to HF Hub
+    if args.push_to_hub:
+        print(f"\nPushing checkpoint to {args.push_to_hub}...")
+        trainer.push_to_hub(args.push_to_hub)
+        print(f"Pushed to https://huggingface.co/{args.push_to_hub}")
+
+    # Phase 3: Post-training evaluation
+    print("\n" + "=" * 60)
+    print("PHASE 3: Post-training Evaluation")
+    print("=" * 60)
+
+    trained = {}
+    trained_results = eval_trained_model(args.output_dir, args.eval_episodes)
+    for d in [1, 3, 5, 7]:
+        d_results = [r for r in trained_results if r["difficulty"] == d]
+        if d_results:
+            trained[d] = {
+                "win_rate": sum(1 for r in d_results if r["won"]) / len(d_results),
+                "avg_reward": sum(r["total_reward"] for r in d_results) / len(d_results),
+            }
+
+    # Phase 4: Comparison
+    print("\n" + "=" * 60)
+    print("COMPARISON: Baseline vs Trained")
+    print("=" * 60)
+    print(f"{'Difficulty':<12} {'Base WR':<10} {'Train WR':<10} {'Base Reward':<14} {'Train Reward':<14}")
+    print("-" * 60)
+    for d in [1, 3, 5, 7]:
+        bwr = f"{baseline[d]['win_rate']:.0%}" if d in baseline else "N/A"
+        twr = f"{trained[d]['win_rate']:.0%}" if d in trained else "N/A"
+        brw = f"{baseline[d]['avg_reward']:.1f}" if d in baseline else "N/A"
+        trw = f"{trained[d]['avg_reward']:.1f}" if d in trained else "N/A"
+        print(f"{d:<12} {bwr:<10} {twr:<10} {brw:<14} {trw:<14}")
+
+    # Save comparison JSON
+    comparison = {"baseline": baseline, "trained": trained}
+    comp_path = os.path.join(args.data_dir, "comparison.json")
+    os.makedirs(args.data_dir, exist_ok=True)
+    with open(comp_path, "w") as f:
+        json.dump(comparison, f, indent=2)
+    print(f"\nComparison saved to {comp_path}")
+
+    # Generate graph
+    plot_path = os.path.join(args.data_dir, "comparison.png")
+    plot_comparison(baseline, trained, plot_path)
+
+
+def eval_trained_model(checkpoint_dir: str, episodes_per_level: int = 10) -> list:
+    """Run the trained model against the environment and collect results."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch
+
+    print(f"Loading trained model from {checkpoint_dir}...")
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint_dir, torch_dtype=torch.bfloat16, device_map="auto"
+    )
+    model.eval()
+
+    all_results = []
+
+    for difficulty in [1, 3, 5, 7]:
+        print(f"\nEval trained model: difficulty {difficulty} ({episodes_per_level} episodes)")
+        for ep in range(episodes_per_level):
+            env = HFTOversightEnvironment()
+            env._difficulty = difficulty
+            obs = env.reset()
+
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": obs.response + (f"\n\nAlerts: {obs.alerts}" if obs.alerts else "")},
+            ]
+
+            total_reward = 0.0
+            while not obs.done:
+                prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+                with torch.no_grad():
+                    output_ids = model.generate(
+                        **inputs, max_new_tokens=200, temperature=0.3,
+                        do_sample=True, pad_token_id=tokenizer.eos_token_id,
+                    )
+                new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+                llm_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+                try:
+                    action = parse_action(llm_text)
+                except Exception:
+                    action = OversightAction(command="pass_turn")
+
+                obs = env.step(action)
+                total_reward += obs.reward
+                messages.append({"role": "assistant", "content": llm_text})
+                env_msg = obs.response
+                if obs.alerts:
+                    env_msg += f"\n\nAlerts: {obs.alerts}"
+                env_msg += f"\n\n[Step {obs.timestep}/{obs.max_timesteps}]"
+                messages.append({"role": "user", "content": env_msg})
+
+            won = total_reward > 0
+            all_results.append({"difficulty": difficulty, "total_reward": total_reward, "won": won})
+            print(f"  ep {ep+1}: {'WIN' if won else 'LOSS'} reward={total_reward:.1f}")
+
+    return all_results
+
+
+def plot_comparison(baseline: dict, trained: dict, save_path: str):
+    """Generate a comparison bar chart and save as PNG."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("matplotlib not installed — skipping graph generation")
+        return
+
+    difficulties = [1, 3, 5, 7]
+    base_wr = [baseline.get(d, {}).get("win_rate", 0) * 100 for d in difficulties]
+    train_wr = [trained.get(d, {}).get("win_rate", 0) * 100 for d in difficulties]
+    base_rw = [baseline.get(d, {}).get("avg_reward", 0) for d in difficulties]
+    train_rw = [trained.get(d, {}).get("avg_reward", 0) for d in difficulties]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    x = np.arange(len(difficulties))
+    width = 0.35
+
+    # Win rate chart
+    ax1.bar(x - width/2, base_wr, width, label="Baseline", color="#4a90d9")
+    ax1.bar(x + width/2, train_wr, width, label="GRPO Trained", color="#e8744f")
+    ax1.set_xlabel("Difficulty")
+    ax1.set_ylabel("Win Rate (%)")
+    ax1.set_title("Win Rate: Baseline vs Trained")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(difficulties)
+    ax1.legend()
+    ax1.set_ylim(0, 105)
+
+    # Avg reward chart
+    ax2.bar(x - width/2, base_rw, width, label="Baseline", color="#4a90d9")
+    ax2.bar(x + width/2, train_rw, width, label="GRPO Trained", color="#e8744f")
+    ax2.set_xlabel("Difficulty")
+    ax2.set_ylabel("Avg Reward")
+    ax2.set_title("Avg Reward: Baseline vs Trained")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(difficulties)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"Comparison graph saved to {save_path}")
 
 
 if __name__ == "__main__":
